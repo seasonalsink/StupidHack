@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="UTF-8">
+<title>Bsackroom — Taso 0</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#1a1500; overflow:hidden; font-family:monospace; }
+canvas { display:block; }
+#overlay {
+  position:fixed; inset:0;
+  background:rgba(0,0,0,0.88);
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  color:#c8b060; cursor:pointer; z-index:100;
+  text-align:center; gap:16px;
+}
+#overlay h1 { font-size:3.5em; letter-spacing:0.3em; text-shadow:0 0 30px #c8a040; }
+#overlay .sub { opacity:0.6; font-size:1em; }
+#overlay .keys { opacity:0.35; font-size:0.8em; line-height:2; }
+#ui {
+  position:fixed; inset:0; pointer-events:none; z-index:50;
+}
+#sanity-bar {
+  position:absolute; top:20px; right:20px;
+  color:rgba(200,176,96,0.55); font-size:0.8em; text-align:right;
+}
+#sanity-fill {
+  display:inline-block; width:80px; height:4px;
+  background:rgba(200,176,96,0.2); vertical-align:middle; margin-left:6px;
+}
+#sanity-inner {
+  height:100%; width:100%; background:#c8b060;
+  transition:width 1s;
+}
+#location {
+  position:absolute; bottom:24px; left:50%;
+  transform:translateX(-50%);
+  color:rgba(200,176,96,0.35); font-size:0.75em; letter-spacing:0.1em;
+}
+#dot {
+  position:absolute; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  width:4px; height:4px;
+  background:rgba(200,176,96,0.4); border-radius:50%;
+}
+#vignette {
+  position:absolute; inset:0;
+  background:radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+}
+#flash {
+  position:absolute; inset:0;
+  background:rgba(0,0,0,0);
+  transition:background 0.05s;
+  pointer-events:none;
+}
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>SISU</h1>
+  <div class="sub">Taso 0 — Kurssi-ilmo</div>
+  <div class="sub" style="opacity:0.45;font-size:0.85em">Klikkaa aloittaaksesi</div>
+  <div class="keys">
+    WASD — liiku &nbsp;|&nbsp; Hiiri — katso<br>
+    Ei ulospääsyä.
+  </div>
+</div>
+
+<div id="ui">
+  <div id="vignette"></div>
+  <div id="flash"></div>
+  <div id="dot"></div>
+  <div id="sanity-bar">
+    SANITY <div id="sanity-fill"><div id="sanity-inner"></div></div>
+  </div>
+  <div id="location">LEVEL 0 &nbsp;·&nbsp; ∞</div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.158.0/build/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Maze generation ────────────────────────────────────────────────────────
+const COLS = 22, ROWS = 22, CELL = 5;
+const WALL_H = 3.0, CEIL_H = WALL_H;
+
+function buildMaze(cols, rows) {
+  const grid = Array.from({length:rows}, () =>
+    Array.from({length:cols}, () => ({n:true,s:true,e:true,w:true,visited:false}))
+  );
+  const stack = [];
+  const start = {x:0,y:0};
+  grid[0][0].visited = true;
+  stack.push(start);
+  const opp = {n:'s',s:'n',e:'w',w:'e'};
+  const delta = {n:[0,-1],s:[0,1],e:[1,0],w:[-1,0]};
+  while (stack.length) {
+    const {x,y} = stack[stack.length-1];
+    const dirs = ['n','s','e','w']
+      .filter(d=>{ const [dx,dy]=delta[d]; const nx=x+dx,ny=y+dy;
+        return nx>=0&&nx<cols&&ny>=0&&ny<rows&&!grid[ny][nx].visited; })
+      .sort(()=>Math.random()-0.5);
+    if (!dirs.length) { stack.pop(); continue; }
+    const d = dirs[0];
+    const [dx,dy] = delta[d];
+    grid[y][x][d] = false;
+    grid[y+dy][x+dx][opp[d]] = false;
+    grid[y+dy][x+dx].visited = true;
+    stack.push({x:x+dx,y:y+dy});
+  }
+  return grid;
+}
+
+const maze = buildMaze(COLS, ROWS);
+
+// ── Canvas textures ────────────────────────────────────────────────────────
+function makeWallTex() {
+  const c = document.createElement('canvas'); c.width=512; c.height=512;
+  const ctx = c.getContext('2d');
+  // Base warm yellow
+  ctx.fillStyle='#d4b86a'; ctx.fillRect(0,0,512,512);
+  // Slight gradient for aging
+  const g = ctx.createRadialGradient(256,256,0,256,256,400);
+  g.addColorStop(0,'rgba(220,190,100,0.3)');
+  g.addColorStop(1,'rgba(80,60,20,0.4)');
+  ctx.fillStyle=g; ctx.fillRect(0,0,512,512);
+  // Diamond/floral wallpaper pattern
+  ctx.strokeStyle='rgba(160,130,60,0.35)'; ctx.lineWidth=1;
+  for (let row=0; row<8; row++) {
+    for (let col=0; col<8; col++) {
+      const cx=col*64+32, cy=row*64+32, s=22;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy-s); ctx.lineTo(cx+s, cy);
+      ctx.lineTo(cx, cy+s); ctx.lineTo(cx-s, cy);
+      ctx.closePath(); ctx.stroke();
+      // inner ornament
+      ctx.beginPath();
+      ctx.moveTo(cx, cy-s*0.5); ctx.lineTo(cx+s*0.5, cy);
+      ctx.lineTo(cx, cy+s*0.5); ctx.lineTo(cx-s*0.5, cy);
+      ctx.closePath(); ctx.stroke();
+    }
+  }
+  // Noise / stains
+  for (let i=0;i<600;i++) {
+    ctx.fillStyle=`rgba(${Math.random()>0.5?180:100},${Math.random()>0.5?140:80},40,${Math.random()*0.06})`;
+    ctx.fillRect(Math.random()*512, Math.random()*512, Math.random()*8+1, Math.random()*8+1);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(2,1); return t;
+}
+
+function makeFloorTex() {
+  const c = document.createElement('canvas'); c.width=512; c.height=512;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle='#6b6040'; ctx.fillRect(0,0,512,512);
+  // Carpet fiber noise
+  for (let i=0;i<8000;i++) {
+    const x=Math.random()*512, y=Math.random()*512;
+    const l=Math.random()*3+1;
+    ctx.strokeStyle=`rgba(${80+Math.random()*40},${70+Math.random()*30},${20+Math.random()*20},0.4)`;
+    ctx.lineWidth=0.8;
+    ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+Math.random()*l-l/2,y+l); ctx.stroke();
+  }
+  // Wet stains
+  for (let i=0;i<12;i++) {
+    const g=ctx.createRadialGradient(Math.random()*512,Math.random()*512,0,Math.random()*512,Math.random()*512,30+Math.random()*60);
+    g.addColorStop(0,'rgba(40,50,30,0.3)'); g.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,512,512);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(4,4); return t;
+}
+
+function makeCeilTex() {
+  const c = document.createElement('canvas'); c.width=512; c.height=512;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle='#c8c0a8'; ctx.fillRect(0,0,512,512);
+  // Acoustic tile grid
+  ctx.strokeStyle='rgba(140,130,110,0.6)'; ctx.lineWidth=2;
+  for (let i=0;i<=8;i++) { ctx.beginPath(); ctx.moveTo(i*64,0); ctx.lineTo(i*64,512); ctx.stroke(); }
+  for (let i=0;i<=8;i++) { ctx.beginPath(); ctx.moveTo(0,i*64); ctx.lineTo(512,i*64); ctx.stroke(); }
+  // Tile texture dots
+  for (let i=0;i<3000;i++) {
+    ctx.fillStyle=`rgba(160,150,130,${Math.random()*0.15})`;
+    ctx.fillRect(Math.random()*512, Math.random()*512, 1, 1);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(3,3); return t;
+}
+
+// ── Three.js setup ─────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = false;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0d0900);
+scene.fog = new THREE.FogExp2(0x1a1200, 0.055);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 60);
+camera.position.set(CELL*0.5, 1.7, CELL*0.5);
+
+// ── Materials ──────────────────────────────────────────────────────────────
+const wallTex = makeWallTex();
+const floorTex = makeFloorTex();
+const ceilTex = makeCeilTex();
+
+const wallMat = new THREE.MeshLambertMaterial({map:wallTex, color:0xddcc88});
+const floorMat = new THREE.MeshLambertMaterial({map:floorTex, color:0x998855});
+const ceilMat = new THREE.MeshLambertMaterial({map:ceilTex, color:0xccbf99});
+
+// ── Build scene geometry ───────────────────────────────────────────────────
+// Floor & ceiling (one big plane each)
+const totalW = COLS*CELL, totalD = ROWS*CELL;
+const floorGeo = new THREE.PlaneGeometry(totalW, totalD);
+const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+floorMesh.rotation.x = -Math.PI/2;
+floorMesh.position.set(totalW/2, 0, totalD/2);
+scene.add(floorMesh);
+
+const ceilGeo = new THREE.PlaneGeometry(totalW, totalD);
+const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
+ceilMesh.rotation.x = Math.PI/2;
+ceilMesh.position.set(totalW/2, CEIL_H, totalD/2);
+scene.add(ceilMesh);
+
+// Walls from maze
+const wallThick = 0.22;
+const wallObjs = []; // for collision
+
+for (let row=0; row<ROWS; row++) {
+  for (let col=0; col<COLS; col++) {
+    const cell = maze[row][col];
+    const ox = col*CELL, oz = row*CELL;
+    // North wall
+    if (cell.n) {
+      const g = new THREE.BoxGeometry(CELL+wallThick, WALL_H, wallThick);
+      const m = new THREE.Mesh(g, wallMat);
+      m.position.set(ox+CELL/2, WALL_H/2, oz);
+      scene.add(m);
+      wallObjs.push({cx:ox+CELL/2, cz:oz, hw:CELL/2+wallThick/2, hd:wallThick/2});
+    }
+    // West wall
+    if (cell.w) {
+      const g = new THREE.BoxGeometry(wallThick, WALL_H, CELL+wallThick);
+      const m = new THREE.Mesh(g, wallMat);
+      m.position.set(ox, WALL_H/2, oz+CELL/2);
+      scene.add(m);
+      wallObjs.push({cx:ox, cz:oz+CELL/2, hw:wallThick/2, hd:CELL/2+wallThick/2});
+    }
+  }
+}
+// South border
+for (let col=0; col<COLS; col++) {
+  const ox=col*CELL;
+  const g = new THREE.BoxGeometry(CELL+wallThick, WALL_H, wallThick);
+  const m = new THREE.Mesh(g, wallMat);
+  m.position.set(ox+CELL/2, WALL_H/2, ROWS*CELL);
+  scene.add(m);
+  wallObjs.push({cx:ox+CELL/2, cz:ROWS*CELL, hw:CELL/2+wallThick/2, hd:wallThick/2});
+}
+// East border
+for (let row=0; row<ROWS; row++) {
+  const oz=row*CELL;
+  const g = new THREE.BoxGeometry(wallThick, WALL_H, CELL+wallThick);
+  const m = new THREE.Mesh(g, wallMat);
+  m.position.set(COLS*CELL, WALL_H/2, oz+CELL/2);
+  scene.add(m);
+  wallObjs.push({cx:COLS*CELL, cz:oz+CELL/2, hw:wallThick/2, hd:CELL/2+wallThick/2});
+}
+
+// ── Fluorescent lights ─────────────────────────────────────────────────────
+const lights = [];
+const lightInterval = 3; // every 3rd cell gets a light
+
+for (let row=0; row<ROWS; row+=lightInterval) {
+  for (let col=0; col<COLS; col+=lightInterval) {
+    const px = col*CELL+CELL/2, pz = row*CELL+CELL/2;
+    const pl = new THREE.PointLight(0xfff5cc, 2.5, 20);
+    pl.position.set(px, CEIL_H-0.15, pz);
+    scene.add(pl);
+    lights.push({light:pl, base:1.8, phase:Math.random()*Math.PI*2, flicker:Math.random()<0.12});
+
+    // Visible tube
+    const tubeGeo = new THREE.BoxGeometry(1.2, 0.06, 0.12);
+    const tubeMat = new THREE.MeshBasicMaterial({color:0xfffde0});
+    const tube = new THREE.Mesh(tubeGeo, tubeMat);
+    tube.position.set(px, CEIL_H-0.05, pz);
+    scene.add(tube);
+  }
+}
+
+// Dim ambient
+const ambient = new THREE.AmbientLight(0x221a00, 1.5);
+scene.add(ambient);
+
+// ── Entities ───────────────────────────────────────────────────────────────
+function makeTextSprite(text) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+
+  // Tausta
+  ctx.fillStyle = "rgba(0,0,0,0.7)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Teksti
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 48px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, canvas.width/2, canvas.height/2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const material = new THREE.SpriteMaterial({ map: texture });
+  const sprite = new THREE.Sprite(material);
+
+  sprite.scale.set(3, 1.5, 1);
+  return sprite;
+}
+
+
+/////////////////////////////////
+
+const entityMat = new THREE.MeshBasicMaterial({color:0x050300, transparent:true, opacity:0.92});
+const entities = [];
+
+function spawnEntity(col, row) {
+  const group = new THREE.Group();
+  // Body
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.5,1.1,0.22), entityMat);
+  body.position.y=0.95;
+  group.add(body);
+  // Head
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.36,0.36,0.28), entityMat);
+  head.position.y=1.68;
+  group.add(head);
+
+  const textSprite = makeTextSprite("EI HYVÄKSYTTY");
+textSprite.position.set(0, 2.4, 0); // pään yläpuolelle
+group.add(textSprite);
+
+  // Arms
+  [-0.42,0.42].forEach(x=>{
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.18,0.9,0.18), entityMat);
+    arm.position.set(x,0.95,0); group.add(arm);
+  });
+  // Legs
+  [-0.15,0.15].forEach(x=>{
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.85,0.2), entityMat);
+    leg.position.set(x,0.38,0); group.add(leg);
+  });
+  group.position.set(col*CELL+CELL/2, 0, row*CELL+CELL/2);
+  scene.add(group);
+  entities.push({mesh:group, col, row, speed:0.008+Math.random()*0.006, timer:0, targetCol:col, targetRow:row});
+}
+
+// Spawn 6 entities far from start
+for (let i=0;i<6;i++) {
+  const c=10+Math.floor(Math.random()*(COLS-12));
+  const r=10+Math.floor(Math.random()*(ROWS-12));
+  spawnEntity(c,r);
+}
+
+// ── Controls ───────────────────────────────────────────────────────────────
+let locked = false;
+const keys = {};
+let yaw=0, pitch=0;
+
+const overlay = document.getElementById('overlay');
+overlay.addEventListener('click', ()=>{
+  renderer.domElement.requestPointerLock();
+});
+document.addEventListener('pointerlockchange', ()=>{
+  locked = document.pointerLockElement===renderer.domElement;
+  overlay.style.display = locked ? 'none' : 'flex';
+});
+document.addEventListener('keydown', e=>{ keys[e.code]=true; });
+document.addEventListener('keyup',   e=>{ keys[e.code]=false; });
+document.addEventListener('mousemove', e=>{
+  if (!locked) return;
+  yaw   -= e.movementX * 0.002;
+  pitch -= e.movementY * 0.002;
+  pitch = Math.max(-1.2, Math.min(1.2, pitch));
+});
+
+// ── Audio (Web Audio API) ──────────────────────────────────────────────────
+let audioCtx, humGain, heartGain;
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  // Fluorescent hum
+  const osc1 = audioCtx.createOscillator();
+  const osc2 = audioCtx.createOscillator();
+  osc1.type='sawtooth'; osc1.frequency.value=60;
+  osc2.type='sine';     osc2.frequency.value=120;
+  humGain = audioCtx.createGain(); humGain.gain.value=0.04;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type='lowpass'; filter.frequency.value=300;
+  osc1.connect(filter); osc2.connect(filter);
+  filter.connect(humGain); humGain.connect(audioCtx.destination);
+  osc1.start(); osc2.start();
+  // Heartbeat
+  heartGain = audioCtx.createGain(); heartGain.gain.value=0;
+  heartGain.connect(audioCtx.destination);
+}
+document.addEventListener('pointerlockerror', ()=>{});
+
+function playHeartbeat() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type='sine'; o.frequency.value=55;
+  g.gain.setValueAtTime(0,t);
+  g.gain.linearRampToValueAtTime(0.3,t+0.04);
+  g.gain.exponentialRampToValueAtTime(0.001,t+0.25);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(t); o.stop(t+0.3);
+  setTimeout(()=>{
+    const t2=audioCtx.currentTime;
+    const o2=audioCtx.createOscillator();
+    const g2=audioCtx.createGain();
+    o2.type='sine'; o2.frequency.value=50;
+    g2.gain.setValueAtTime(0,t2);
+    g2.gain.linearRampToValueAtTime(0.2,t2+0.04);
+    g2.gain.exponentialRampToValueAtTime(0.001,t2+0.2);
+    o2.connect(g2); g2.connect(audioCtx.destination);
+    o2.start(t2); o2.stop(t2+0.25);
+  },120);
+}
+
+// ── Collision ──────────────────────────────────────────────────────────────
+const PLAYER_R = 0.35;
+function collide(px, pz) {
+  for (const w of wallObjs) {
+    const dx = Math.abs(px-w.cx) - (w.hw+PLAYER_R);
+    const dz = Math.abs(pz-w.cz) - (w.hd+PLAYER_R);
+    if (dx<0 && dz<0) return true;
+  }
+  return false;
+}
+function tryMove(px, pz, dx, dz) {
+  const nx=px+dx, nz=pz+dz;
+  if (!collide(nx, nz)) return [nx,nz];
+  if (!collide(nx, pz)) return [nx,pz];
+  if (!collide(px, nz)) return [px,nz];
+  return [px,pz];
+}
+
+// ── Game state ─────────────────────────────────────────────────────────────
+let sanity=100;
+let lastHeart=0;
+const sanityInner = document.getElementById('sanity-inner');
+const flashEl = document.getElementById('flash');
+let flickerIntensity=0;
+
+// ── Main loop ──────────────────────────────────────────────────────────────
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  if (locked) {
+    initAudio();
+
+    // Camera rotation
+    camera.rotation.order='YXZ';
+    camera.rotation.y=yaw;
+    camera.rotation.x=pitch;
+
+    // Movement
+    const speed=4.5;
+    let mx=0, mz=0;
+    if (keys['KeyW']||keys['ArrowUp'])    { mx-=Math.sin(yaw); mz-=Math.cos(yaw); }
+    if (keys['KeyS']||keys['ArrowDown'])  { mx+=Math.sin(yaw); mz+=Math.cos(yaw); }
+    if (keys['KeyA']||keys['ArrowLeft'])  { mx-=Math.cos(yaw); mz+=Math.sin(yaw); }
+    if (keys['KeyD']||keys['ArrowRight']) { mx+=Math.cos(yaw); mz-=Math.sin(yaw); }
+    const len=Math.sqrt(mx*mx+mz*mz);
+    if (len>0) { mx/=len; mz/=len; }
+    const [nx,nz]=tryMove(camera.position.x, camera.position.z, mx*speed*dt, mz*speed*dt);
+    camera.position.x=nx; camera.position.z=nz;
+    camera.position.y=1.7+Math.sin(t*3)*0.025*(len>0?1:0); // head bob
+
+    // Lights flicker
+    let globalFlicker=1;
+    if (Math.sin(t*0.7)>0.99) {
+  globalFlicker = 0.7; // ennen 0.1
+  flickerIntensity = 0.2;}
+    flashEl.style.background=`rgba(0,0,0,${flickerIntensity*0.6})`;
+
+    lights.forEach(({light,base,phase,flicker})=>{
+      if (flicker) {
+        light.intensity=base*(0.7+0.3*Math.sin(t*17+phase))*(0.9+0.1*Math.sin(t*43+phase))*globalFlicker;
+      } else {
+        light.intensity=base*globalFlicker*(0.95+0.05*Math.sin(t*8+phase));
+      }
+    });
+
+    // Entity movement & sanity
+    let minDist=Infinity;
+    entities.forEach(ent=>{
+      ent.timer+=dt;
+      if (ent.timer>2+Math.random()*2) {
+        ent.timer=0;
+        const dirs=['n','s','e','w'].filter(d=>{
+          const dc=d==='e'?1:d==='w'?-1:0;
+          const dr=d==='s'?1:d==='n'?-1:0;
+          const nc=ent.col+dc, nr=ent.row+dr;
+          if (nc<0||nc>=COLS||nr<0||nr>=ROWS) return false;
+          const cell=maze[ent.row][ent.col];
+          return !cell[d];
+        });
+        if (dirs.length) {
+          const d=dirs[Math.floor(Math.random()*dirs.length)];
+          ent.col+=d==='e'?1:d==='w'?-1:0;
+          ent.row+=d==='s'?1:d==='n'?-1:0;
+          ent.targetCol=ent.col; ent.targetRow=ent.row;
+        }
+      }
+      ent.mesh.position.x=ent.col*CELL+CELL/2;
+      ent.mesh.position.z=ent.row*CELL+CELL/2;
+      ent.mesh.lookAt(camera.position.x, 0, camera.position.z);
+
+      const dx=ent.mesh.position.x-camera.position.x;
+      const dz=ent.mesh.position.z-camera.position.z;
+      const dist=Math.sqrt(dx*dx+dz*dz);
+      if (dist<minDist) minDist=dist;
+    });
+
+    // Sanity
+    if (minDist<8) sanity-=dt*6*(1-minDist/8);
+    else sanity-=dt*0.3;
+    sanity=Math.max(0,Math.min(100,sanity));
+    sanityInner.style.width=sanity+'%';
+    sanityInner.style.background=sanity>60?'#c8b060':sanity>30?'#c87030':'#c83030';
+
+    // Heartbeat
+    if (minDist<12) {
+      const interval=Math.max(0.6, minDist/12*2.2);
+      if (t-lastHeart>interval) { lastHeart=t; playHeartbeat(); }
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+
+animate();
+</script>
+
+</body>
+</html>
